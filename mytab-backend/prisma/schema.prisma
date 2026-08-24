@@ -1,0 +1,104 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                  String   @id @default(uuid())
+  username            String   @unique
+  smartAccountAddress String   @unique
+  signerAddress       String
+  onboardingStatus    String
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+model PhoneHashAudit {
+  id            String   @id @default(uuid())
+  hashReference String
+  timestamp     DateTime @default(now())
+}
+
+model WalletRecord {
+  id               String   @id @default(uuid())
+  address          String   @unique
+  deploymentStatus String
+  chain            String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+// ── Week 3: Read-cache models ──────────────────────────────────────────────────
+
+/// Mirror of on-chain Pledge structs. The chain is the source of truth.
+/// Every write is idempotent via ProcessedEvent; this table is a read cache only.
+model PledgeMirror {
+  id             String   @id @default(uuid())
+  pledgeId       String   @unique
+  lenderAddress  String
+  debtorAddress  String
+  amount         String
+  token          String
+  dueTimestamp   Int
+  status         String
+  track          String
+  createdAt      Int
+  claimedAt      Int?
+  lastClaimAt    Int?
+  txHash         String?
+  blockNumber    Int?
+  confirmedDepth Int      @default(0)
+  updatedAt      DateTime @updatedAt
+
+  @@index([debtorAddress, status])
+  @@index([lenderAddress, status])
+  @@index([status, dueTimestamp])
+}
+
+/// Mirrors the state of ReputationEngine and IdentityRegistry blacklisting.
+model ReputationMirror {
+  id               String   @id @default(uuid())
+  walletAddress    String   @unique
+  tier             Int      @default(0)
+  isBlacklisted    Boolean  @default(false)
+  disapprovalCount Int      @default(0)
+  updatedAt        DateTime @updatedAt
+}
+
+/// Idempotency log for every indexed on-chain event.
+model ProcessedEvent {
+  id          String   @id @default(uuid())
+  txHash      String
+  logIndex    Int
+  eventName   String
+  processedAt DateTime @default(now())
+
+  @@unique([txHash, logIndex])
+}
+
+/// Tracks the last block the indexer has fully processed per contract.
+model IndexerCursor {
+  id               String   @id @default(uuid())
+  contractAddress  String   @unique
+  lastIndexedBlock Int
+  updatedAt        DateTime @updatedAt
+}
+
+/// Tracks every submitted UserOp to guarantee no fire-and-forget.
+/// status: pending | included | failed | timeout
+model UserOpTracking {
+  id           String   @id @default(uuid())
+  userOpHash   String   @unique
+  sender       String
+  operation    String
+  status       String   @default("pending")
+  txHash       String?
+  revertReason String?
+  attempts     Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
