@@ -1,0 +1,10 @@
+# Roles Matrix
+
+| Role | Gated Functions | Sepolia Address | Mainnet Address | Attacker Capability (If Compromised) |
+|---|---|---|---|---|
+| `DEFAULT_ADMIN_ROLE` | `grantRole`, `renounceRole`, `revokeRole` | Configured Multisig | Configured Multisig | Complete protocol takeover. Could grant `UPGRADER_ROLE` to upgrade contracts to malicious versions, or grant any functional role below to freeze funds, arbitrarily create identities, or wipe reputations. |
+| `UPGRADER_ROLE` | `_authorizeUpgrade` in ReputationEngine & PledgeLedger | Configured Multisig | Configured Multisig | Can push malicious upgrades to core contracts, permanently bricking them, altering state logic, or stealing/trapping user funds or access. |
+| `REGISTRAR_ROLE` | `registerIdentity` in IdentityRegistry | Relayer (Env) | Relayer (Backend) | Could register arbitrary fake phone numbers and usernames to attacker-controlled wallets. While they cannot rewrite *existing* phone hashes, they could squat on real users' phone numbers before they sign up, effectively bricking genuine users out of the system forever. |
+| `REPUTATION_ROLE` | `setBlacklisted` in IdentityRegistry | ReputationEngine Proxy | ReputationEngine Proxy | Could arbitrarily blacklist any identity in the system permanently, blocking them from participating in new pledges. Since there is no removal function, this is irreversible. |
+| `DISAPPROVAL_REPORTER_ROLE` | `recordDisapproval` in ReputationEngine | Test Reporter (Env) | SettlementRouter | Could spam disapprovals on any debtor, forcing them up the reputation tiers instantly, placing them in `Enforced` mode, and eventually pushing them into a permanent `Blacklisted` status. |
+| `SETTLEMENT_ROLE` | `setSettled`, `setDefaulted`, `setDisapproved` in PledgeLedger | Test Reporter (Env) | SettlementRouter | Could arbitrarily mark pending or active pledges as settled, defaulted, or actively dispute settlements. This completely breaks the ledger's reality, falsely clearing debts or defaulting users who paid on time. |
