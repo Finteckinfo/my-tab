@@ -7,8 +7,10 @@ import {
   BadRequestException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { decodeFunctionData } from 'viem';
 import { LedgerService } from './ledger.service';
 import { PUBLIC_CLIENT, BUNDLER_CLIENT, SPONSOR_ACCOUNT } from '../chain/chain.module';
+import { LIGHT_ACCOUNT_ABI } from '../abis/LightAccount.abi';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const ZERO_ADDR = '0x0000000000000000000000000000000000000000';
@@ -33,6 +35,7 @@ const makeConfig = (overrides: Record<string, string> = {}) => ({
       IDENTITY_REGISTRY_ADDRESS: '0x' + 'a'.repeat(40),
       REPUTATION_ENGINE_ADDRESS: '0x' + 'b'.repeat(40),
       PLEDGE_LEDGER_ADDRESS: '0x' + 'c'.repeat(40),
+      SETTLEMENT_ROUTER_ADDRESS: '0x' + 'e'.repeat(40),
       PAYMASTER_ADDRESS: '0x' + 'd'.repeat(40),
       ...overrides,
     };
@@ -237,7 +240,7 @@ describe('LedgerService', () => {
       await expect(service.confirmPledge(`Bearer ${validJwt}`, '1')).rejects.toThrow(NotFoundException);
     });
 
-    it('403 if caller is not the debtor', async () => {
+    it('confirm by a non-debtor rejected (403)', async () => {
       await buildModule();
       (service as any).prisma = {
         pledgeMirror: {
@@ -248,7 +251,7 @@ describe('LedgerService', () => {
       await expect(service.confirmPledge(`Bearer ${validJwt}`, '1')).rejects.toThrow(ForbiddenException);
     });
 
-    it('400 if status is not Pending', async () => {
+    it('confirm twice rejected (400 InvalidStatus)', async () => {
       await buildModule();
       (service as any).prisma = {
         pledgeMirror: {
@@ -258,26 +261,146 @@ describe('LedgerService', () => {
       await expect(service.confirmPledge(`Bearer ${validJwt}`, '1')).rejects.toThrow(BadRequestException);
     });
 
-    it('400 if confirmation window expired', async () => {
+    it('confirm after the window rejected (400 ConfirmationWindowExpired)', async () => {
       await buildModule();
       (service as any).prisma = {
         pledgeMirror: {
-          // 8 days ago
+          // 8 days ago (> 7 days)
           findUnique: jest.fn().mockResolvedValue({ debtorAddress: LENDER_ADDR, status: 'Pending', createdAt: Math.floor(Date.now() / 1000) - 8 * 86400 }),
         },
       };
       await expect(service.confirmPledge(`Bearer ${validJwt}`, '1')).rejects.toThrow(BadRequestException);
     });
 
-    it('submits UserOp on success', async () => {
+    it('confirming an Enforced pledge produces both calls in one UserOp (executeBatch)', async () => {
       await buildModule();
       (service as any).prisma = {
-        pledgeMirror: { findUnique: jest.fn().mockResolvedValue({ debtorAddress: LENDER_ADDR, status: 'Pending', createdAt: Math.floor(Date.now() / 1000) }) },
+        pledgeMirror: {
+          findUnique: jest.fn().mockResolvedValue({
+            pledgeId: '1',
+            debtorAddress: LENDER_ADDR,
+            token: VALID_TOKEN,
+            amount: '500',
+            track: 'Enforced',
+            status: 'Pending',
+            createdAt: Math.floor(Date.now() / 1000),
+          }),
+        },
         userOpTracking: { create: jest.fn().mockResolvedValue({}) },
       };
+
       const res = await service.confirmPledge(`Bearer ${validJwt}`, '1');
       expect(res.status).toBe('pending');
+
+      const userOp = (bundlerClientMock.request as jest.Mock).mock.calls[0][0].params[0];
+      const decoded: any = decodeFunctionData({
+        abi: LIGHT_ACCOUNT_ABI,
+        data: userOp.callData,
+      });
+      expect(decoded.functionName).toBe('executeBatch');
+      expect(decoded.args[0]).toHaveLength(2); // token and pledgeLedger
+      expect(decoded.args[1]).toHaveLength(2); // approve and confirm
       expect(trackerQueueMock.add).toHaveBeenCalledWith('pollReceipt', { userOpHash: USER_OP_HASH, operation: 'confirmPledge' }, expect.any(Object));
+    });
+
+    it('confirming a Voluntary pledge produces only the confirm (execute)', async () => {
+      await buildModule();
+      (service as any).prisma = {
+        pledgeMirror: {
+          findUnique: jest.fn().mockResolvedValue({
+            pledgeId: '1',
+            debtorAddress: LENDER_ADDR,
+            token: VALID_TOKEN,
+            amount: '500',
+            track: 'Voluntary',
+            status: 'Pending',
+            createdAt: Math.floor(Date.now() / 1000),
+          }),
+        },
+        userOpTracking: { create: jest.fn().mockResolvedValue({}) },
+      };
+
+      const res = await service.confirmPledge(`Bearer ${validJwt}`, '1');
+      expect(res.status).toBe('pending');
+
+      const userOp = (bundlerClientMock.request as jest.Mock).mock.calls[0][0].params[0];
+      const decoded: any = decodeFunctionData({
+        abi: LIGHT_ACCOUNT_ABI,
+        data: userOp.callData,
+      });
+      expect(decoded.functionName).toBe('execute');
+    });
+  });
+
+  describe('getAllowance', () => {
+    it('returns current and required allowance for Enforced pledge', async () => {
+      await buildModule();
+      (service as any).prisma = {
+        pledgeMirror: {
+          findUnique: jest.fn().mockResolvedValue({
+            pledgeId: '1',
+            debtorAddress: DEBTOR_ADDR,
+            token: VALID_TOKEN,
+            amount: '500',
+            track: 'Enforced',
+            status: 'Active',
+          }),
+        },
+      };
+      publicClientMock.readContract = jest.fn().mockResolvedValue(500n);
+
+      const res = await service.getAllowance(`Bearer ${validJwt}`, '1');
+      expect(res).toEqual({
+        pledgeId: '1',
+        currentAllowance: '500',
+        requiredAllowance: '500',
+        current: '500',
+        required: '500',
+        isSufficient: true,
+      });
+    });
+
+    it('flags insufficient allowance if current < required', async () => {
+      await buildModule();
+      (service as any).prisma = {
+        pledgeMirror: {
+          findUnique: jest.fn().mockResolvedValue({
+            pledgeId: '1',
+            debtorAddress: DEBTOR_ADDR,
+            token: VALID_TOKEN,
+            amount: '500',
+            track: 'Enforced',
+            status: 'Active',
+          }),
+        },
+      };
+      publicClientMock.readContract = jest.fn().mockResolvedValue(100n);
+
+      const res = await service.getAllowance(`Bearer ${validJwt}`, '1');
+      expect(res.isSufficient).toBe(false);
+      expect(res.currentAllowance).toBe('100');
+      expect(res.requiredAllowance).toBe('500');
+    });
+
+    it('returns required 0 for Voluntary pledge', async () => {
+      await buildModule();
+      (service as any).prisma = {
+        pledgeMirror: {
+          findUnique: jest.fn().mockResolvedValue({
+            pledgeId: '1',
+            debtorAddress: DEBTOR_ADDR,
+            token: VALID_TOKEN,
+            amount: '500',
+            track: 'Voluntary',
+            status: 'Active',
+          }),
+        },
+      };
+      publicClientMock.readContract = jest.fn().mockResolvedValue(0n);
+
+      const res = await service.getAllowance(`Bearer ${validJwt}`, '1');
+      expect(res.requiredAllowance).toBe('0');
+      expect(res.isSufficient).toBe(true);
     });
   });
 
@@ -290,7 +413,7 @@ describe('LedgerService', () => {
       await expect(service.cancelPledge(`Bearer ${validJwt}`, '1')).rejects.toThrow(ForbiddenException);
     });
 
-    it('400 if status is not Pending', async () => {
+    it('cancel after confirmation rejected (400 InvalidStatus when Active)', async () => {
       await buildModule();
       (service as any).prisma = {
         pledgeMirror: { findUnique: jest.fn().mockResolvedValue({ lenderAddress: LENDER_ADDR, status: 'Active' }) },
@@ -326,28 +449,28 @@ describe('LedgerService', () => {
       await expect(service.markPaidOffChain(`Bearer ${validJwt}`, '1')).rejects.toThrow(BadRequestException);
     });
 
-    it('400 if claim cooldown has not elapsed', async () => {
+    it('claim-paid spam across the cooldown boundary rejected (400 within 30 days)', async () => {
       await buildModule();
       (service as any).prisma = {
         pledgeMirror: {
           findUnique: jest.fn().mockResolvedValue({
             debtorAddress: LENDER_ADDR,
             status: 'Active',
-            lastClaimAt: Math.floor(Date.now() / 1000) - 10 * 86400, // 10 days ago
+            lastClaimAt: Math.floor(Date.now() / 1000) - 29 * 86400, // 29 days ago (< 30 days)
           }),
         },
       };
       await expect(service.markPaidOffChain(`Bearer ${validJwt}`, '1')).rejects.toThrow(BadRequestException);
     });
 
-    it('submits UserOp on success', async () => {
+    it('submits UserOp on success when cooldown elapsed (31 days ago)', async () => {
       await buildModule();
       (service as any).prisma = {
         pledgeMirror: {
           findUnique: jest.fn().mockResolvedValue({
             debtorAddress: LENDER_ADDR,
             status: 'Active',
-            lastClaimAt: Math.floor(Date.now() / 1000) - 31 * 86400, // 31 days ago
+            lastClaimAt: Math.floor(Date.now() / 1000) - 31 * 86400, // 31 days ago (> 30 days)
           }),
         },
         userOpTracking: { create: jest.fn().mockResolvedValue({}) },

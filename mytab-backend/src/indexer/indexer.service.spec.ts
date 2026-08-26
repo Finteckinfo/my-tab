@@ -280,5 +280,89 @@ describe('IndexerService', () => {
         expect.objectContaining({ data: { lastIndexedBlock: 145 } })
       );
     });
+
+    it('indexer-down scenario: worker stops, 3 pledges created, worker restarts and indexes all 3', async () => {
+      const viem = require('viem');
+      jest.spyOn(viem, 'decodeEventLog')
+        .mockReturnValueOnce({
+          eventName: 'PledgeCreated',
+          args: {
+            pledgeId: 101n,
+            lender: '0x0000000000000000000000000000000000000001',
+            debtor: '0x0000000000000000000000000000000000000002',
+            amount: 500n,
+            token: '0x0000000000000000000000000000000000000003',
+            dueTimestamp: 20000n,
+            track: 0,
+          },
+        })
+        .mockReturnValueOnce({
+          eventName: 'PledgeCreated',
+          args: {
+            pledgeId: 102n,
+            lender: '0x0000000000000000000000000000000000000001',
+            debtor: '0x0000000000000000000000000000000000000002',
+            amount: 600n,
+            token: '0x0000000000000000000000000000000000000003',
+            dueTimestamp: 21000n,
+            track: 1,
+          },
+        })
+        .mockReturnValueOnce({
+          eventName: 'PledgeCreated',
+          args: {
+            pledgeId: 103n,
+            lender: '0x0000000000000000000000000000000000000001',
+            debtor: '0x0000000000000000000000000000000000000002',
+            amount: 700n,
+            token: '0x0000000000000000000000000000000000000003',
+            dueTimestamp: 22000n,
+            track: 0,
+          },
+        });
+
+      publicClientMock.getBlockNumber.mockResolvedValue(50n);
+      prismaMock.indexerCursor.findUnique.mockResolvedValue({ lastIndexedBlock: 10 });
+      publicClientMock.getLogs.mockResolvedValue([
+        { transactionHash: '0x101', logIndex: 0, blockNumber: 25n, data: '0x', topics: [] },
+        { transactionHash: '0x102', logIndex: 1, blockNumber: 26n, data: '0x', topics: [] },
+        { transactionHash: '0x103', logIndex: 2, blockNumber: 27n, data: '0x', topics: [] },
+      ]);
+
+      // Worker starts / runs pollEvents
+      await service.pollEvents();
+
+      // All 3 pledges must be upserted
+      expect(prismaMock.pledgeMirror.upsert).toHaveBeenCalledTimes(3);
+      expect(prismaMock.pledgeMirror.upsert).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          where: { pledgeId: '101' },
+          create: expect.objectContaining({ pledgeId: '101', status: 'Pending', track: 'Voluntary' }),
+        }),
+      );
+      expect(prismaMock.pledgeMirror.upsert).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          where: { pledgeId: '102' },
+          create: expect.objectContaining({ pledgeId: '102', status: 'Pending', track: 'Enforced' }),
+        }),
+      );
+      expect(prismaMock.pledgeMirror.upsert).toHaveBeenNthCalledWith(
+        3,
+        expect.objectContaining({
+          where: { pledgeId: '103' },
+          create: expect.objectContaining({ pledgeId: '103', status: 'Pending', track: 'Voluntary' }),
+        }),
+      );
+
+      // Processed events created for all 3
+      expect(prismaMock.processedEvent.create).toHaveBeenCalledTimes(3);
+      // Cursor advanced to min(50-5, 10+2000) = 45
+      expect(prismaMock.indexerCursor.update).toHaveBeenCalledWith({
+        where: { contractAddress: 'GLOBAL_INDEXER' },
+        data: { lastIndexedBlock: 45 },
+      });
+    });
   });
 });

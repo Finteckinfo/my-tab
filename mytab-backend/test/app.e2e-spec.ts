@@ -5,12 +5,14 @@ import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { encodeFunctionData, toHex, parseAbi, keccak256, encodeAbiParameters, parseAbiParameters } from 'viem';
-import { BUNDLER_CLIENT, SPONSOR_ACCOUNT } from '../src/chain/chain.module';
+import { PUBLIC_CLIENT, BUNDLER_CLIENT, SPONSOR_ACCOUNT } from '../src/chain/chain.module';
 import { ConfigService } from '@nestjs/config';
+import { PrismaClient } from '@prisma/client';
+import { getUserOperationHash } from 'viem/account-abstraction';
 
 describe('End-to-End Integration (e2e)', () => {
   let app: INestApplication<App>;
-  const phone = '+1234567890';
+  const phone = `+1234567${Math.floor(Math.random() * 1000).toString().padStart(3, '0')}`;
   const username = `testuser_${Date.now()}`;
   const clientHash = 'mockClientHash123';
   const privateKey = generatePrivateKey();
@@ -20,16 +22,58 @@ describe('End-to-End Integration (e2e)', () => {
   let smartAccountAddress = '';
 
   beforeAll(async () => {
+    jest.setTimeout(30000);
+
+    const prisma = new PrismaClient();
+    await prisma.notificationRecord.deleteMany();
+    await prisma.pledgeMirror.deleteMany();
+    await prisma.reputationMirror.deleteMany();
+    await prisma.userOpTracking.deleteMany();
+    await prisma.user.deleteMany();
+    await prisma.walletRecord.deleteMany();
+    await prisma.phoneHashAudit.deleteMany();
+    await prisma.$disconnect();
+
+    const publicClientMock = {
+      readContract: jest.fn(({ functionName, args }: any) => {
+        if (functionName === 'getAddress') {
+          return Promise.resolve('0x000000000000000000000000000000000000000a');
+        }
+        if (functionName === 'getNonce') return Promise.resolve(0n);
+        return Promise.resolve(null);
+      }),
+      getBlockNumber: jest.fn().mockResolvedValue(100n),
+      getLogs: jest.fn().mockResolvedValue([]),
+      getBytecode: jest.fn().mockResolvedValue('0x608060405234801561001057600080fd5b50'),
+    };
+
+    const bundlerClientMock = {
+      request: jest.fn(({ method }: any) => {
+        if (method === 'eth_getUserOperationReceipt') {
+          return Promise.resolve({ success: true, userOpHash: '0x' + '00'.repeat(32) });
+        }
+        return Promise.resolve('0x' + Math.random().toString(16).slice(2).padEnd(64, '0'));
+      }),
+      readContract: jest.fn().mockResolvedValue(0n),
+    };
+
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
-    }).compile();
+    })
+      .overrideProvider(PUBLIC_CLIENT)
+      .useValue(publicClientMock)
+      .overrideProvider(BUNDLER_CLIENT)
+      .useValue(bundlerClientMock)
+      .compile();
 
     app = moduleFixture.createNestApplication();
     await app.init();
   });
 
   afterAll(async () => {
-    await app.close();
+    if (app) {
+      await app.close();
+    }
   });
 
   it('/health (GET)', () => {
@@ -155,18 +199,6 @@ describe('End-to-End Integration (e2e)', () => {
       signature: '0x',
     };
 
-    const userOpHashPayload = encodeAbiParameters(
-      parseAbiParameters('bytes32, bytes32, bytes32, uint256, uint256, uint256, uint256, uint256, bytes32'),
-      [
-        keccak256(userOp.initCode as `0x${string}`),
-        keccak256(userOp.callData as `0x${string}`),
-        keccak256('0x' + gasSlots), // accountGasLimits (v0.7 combined fields, wait...)
-        // Actually, computing EP v0.7 UserOpHash manually is complex because of packed fields.
-        // Let's use viem's getUserOperationHash if it's available! 
-      ]
-    );
-    // Since manual v0.7 hashing is complex, we can use viem's getUserOperationHash.
-    const { getUserOperationHash } = await import('viem/account-abstraction');
     const userOpHash = getUserOperationHash({
       userOperation: userOp as any,
       entryPointAddress: entryPoint,

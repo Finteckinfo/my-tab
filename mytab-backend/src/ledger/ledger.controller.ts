@@ -40,6 +40,14 @@ export class LedgerController {
     return this.ledgerService.confirmPledge(auth, pledgeId);
   }
 
+  @Get(':id/allowance')
+  getAllowance(
+    @Headers('authorization') auth: string,
+    @Param('id') pledgeId: string,
+  ) {
+    return this.ledgerService.getAllowance(auth, pledgeId);
+  }
+
   @Delete(':id')
   @HttpCode(202)
   cancelPledge(

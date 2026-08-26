@@ -15,6 +15,8 @@ import { LedgerModule } from './ledger/ledger.module';
 import { ScheduleModule } from '@nestjs/schedule';
 import { IndexerModule } from './indexer/indexer.module';
 import { ReputationModule } from './reputation/reputation.module';
+import { AutomationModule } from './automation/automation.module';
+import { FiatModule } from './fiat/fiat.module';
 
 @Module({
   imports: [
@@ -46,6 +48,8 @@ import { ReputationModule } from './reputation/reputation.module';
     WalletsModule,
     LedgerModule,
     ReputationModule,
+    AutomationModule,
+    FiatModule,
     ScheduleModule.forRoot(),
   ],
   controllers: [AppController],

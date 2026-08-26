@@ -28,10 +28,10 @@ import { PUBLIC_CLIENT, BUNDLER_CLIENT, SPONSOR_ACCOUNT } from '../chain/chain.m
 import { IDENTITY_REGISTRY_ABI } from '../abis/IdentityRegistry.abi';
 import { REPUTATION_ENGINE_ABI } from '../abis/ReputationEngine.abi';
 import { PLEDGE_LEDGER_ABI } from '../abis/PledgeLedger.abi';
+import { ERC20_ABI } from '../abis/ERC20.abi';
+import { LIGHT_ACCOUNT_ABI } from '../abis/LightAccount.abi';
 import type { CreatePledgeDto } from './dto/create-pledge.dto';
 import { signPaymasterData } from './userop/paymaster-signer';
-
-import { ReputationService } from '../reputation/reputation.service';
 
 const ENTRY_POINT = '0x0000000071727De22E5E9d8BAf0edAc6f37da032' as const;
 
@@ -46,7 +46,6 @@ export class LedgerService {
     @Inject(BUNDLER_CLIENT) private readonly bundlerClient: PublicClient,
     @Inject(SPONSOR_ACCOUNT) private readonly sponsorAccount: LocalAccount,
     @InjectQueue('userop-tracker') private readonly trackerQueue: Queue,
-    private readonly reputationService: ReputationService,
   ) {}
 
   async createPledge(authHeader: string, dto: CreatePledgeDto) {
@@ -101,7 +100,18 @@ export class LedgerService {
     }
 
     // ── Pre-flight 5: enforced track check ────────────────────────────────────
-    await this.reputationService.validateTierRule(debtorAddress, dto.track);
+    if (dto.track === 'Voluntary') {
+      const requiresEnforced = await this.publicClient.readContract({
+        address: reputationEngineAddress,
+        abi: REPUTATION_ENGINE_ABI,
+        functionName: 'requiresEnforcedTrack',
+        args: [getAddress(debtorAddress)],
+      });
+
+      if (requiresEnforced) {
+        throw new UnprocessableEntityException('EnforcedTrackRequired');
+      }
+    }
 
     // ── Build callData for PledgeLedger.createPledge ──────────────────────────
     const trackEnum = dto.track === 'Voluntary' ? 0 : 1;
@@ -198,14 +208,70 @@ export class LedgerService {
       throw new BadRequestException('ConfirmationWindowExpired');
     }
 
-    const callData = encodeFunctionData({
+    const pledgeLedgerAddress = this.config.getOrThrow<string>('PLEDGE_LEDGER_ADDRESS') as `0x${string}`;
+    const settlementRouterAddress = this.config.getOrThrow<string>('SETTLEMENT_ROUTER_ADDRESS') as `0x${string}`;
+
+    const confirmCallData = encodeFunctionData({
       abi: PLEDGE_LEDGER_ABI,
       functionName: 'confirmPledge',
       args: [BigInt(pledgeId)],
     });
-    // TODO (Week 4): Batched approve(SettlementRouter) alongside confirmPledge
+
+    let callData: `0x${string}`;
+
+    if (pledge.track === 'Enforced') {
+      // Batched UserOp: token.approve(settlementRouterAddress, pledgeAmount) followed by pledgeLedger.confirmPledge(pledgeId)
+      const approveCallData = encodeFunctionData({
+        abi: ERC20_ABI,
+        functionName: 'approve',
+        args: [settlementRouterAddress, BigInt(pledge.amount)],
+      });
+
+      callData = encodeFunctionData({
+        abi: LIGHT_ACCOUNT_ABI,
+        functionName: 'executeBatch',
+        args: [
+          [getAddress(pledge.token), pledgeLedgerAddress],
+          [approveCallData, confirmCallData],
+        ],
+      });
+    } else {
+      // Voluntary track: single confirm call via execute
+      callData = encodeFunctionData({
+        abi: LIGHT_ACCOUNT_ABI,
+        functionName: 'execute',
+        args: [pledgeLedgerAddress, 0n, confirmCallData],
+      });
+    }
 
     return this._submitSponsoredUserOp(callerAddress, callData, 'confirmPledge');
+  }
+
+  // ── GET /pledges/:id/allowance ──────────────────────────────────────────────
+  async getAllowance(authHeader: string, pledgeId: string) {
+    this._extractAddress(authHeader);
+    const pledge = await this._getPledgeOr404(pledgeId);
+
+    const settlementRouterAddress = this.config.getOrThrow<string>('SETTLEMENT_ROUTER_ADDRESS') as `0x${string}`;
+
+    const currentAllowance = await this.publicClient.readContract({
+      address: getAddress(pledge.token),
+      abi: ERC20_ABI,
+      functionName: 'allowance',
+      args: [getAddress(pledge.debtorAddress), settlementRouterAddress],
+    }) as bigint;
+
+    const requiredAllowance = pledge.track === 'Enforced' ? BigInt(pledge.amount) : 0n;
+    const isSufficient = currentAllowance >= requiredAllowance;
+
+    return {
+      pledgeId: pledge.pledgeId,
+      currentAllowance: currentAllowance.toString(),
+      requiredAllowance: requiredAllowance.toString(),
+      current: currentAllowance.toString(),
+      required: requiredAllowance.toString(),
+      isSufficient,
+    };
   }
 
   // ── DELETE /pledges/:id ─────────────────────────────────────────────────────

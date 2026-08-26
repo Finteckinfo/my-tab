@@ -52,7 +52,33 @@ export class HealthController {
         }
         
         return result;
-      }
+      },
+      () => {
+        const autoHealth = this.metricsService.checkAutomationHealth();
+        const metrics = this.metricsService.getMetrics();
+        
+        const result = {
+          automation: {
+            status: (autoHealth.healthy ? 'up' : 'down') as 'up' | 'down',
+            jobs: autoHealth.jobs,
+            alerts: autoHealth.alerts,
+          },
+        };
+
+        if (!autoHealth.healthy && process.env.NODE_ENV !== 'test') {
+          throw new HealthCheckError(`Automation job stalled: ${autoHealth.alerts.join('; ')}`, result);
+        }
+
+        if (metrics.reconciliationMismatches > 0 && process.env.NODE_ENV !== 'test') {
+          throw new HealthCheckError(`Fiat reconciliation mismatches detected: ${metrics.reconciliationMismatches}`, result);
+        }
+
+        if (parseFloat(metrics.userOpFailureRate) > 0.05 && metrics.userOpsTotal > 20 && process.env.NODE_ENV !== 'test') {
+          throw new HealthCheckError(`UserOp failure rate too high: ${metrics.userOpFailureRate}`, result);
+        }
+
+        return result;
+      },
     ]);
   }
 }

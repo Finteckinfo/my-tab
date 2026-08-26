@@ -102,3 +102,38 @@ model UserOpTracking {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 }
+
+/// Tracks emitted notifications per pledge and interval to prevent duplicates across restarts.
+model NotificationRecord {
+  id         String   @id @default(uuid())
+  pledgeId   String
+  interval   String
+  emittedAt  DateTime @default(now())
+
+  @@unique([pledgeId, interval])
+  @@index([pledgeId])
+}
+
+// ── Week 5: Fiat bridge (sandbox only) ──────────────────────────────────────
+
+/// Tracks fiat on/off-ramp transactions. The phone number is NEVER stored;
+/// it is provided at request time, verified via OTP, and passed to the provider.
+model SettlementTransaction {
+  id             String   @id @default(uuid())
+  idempotencyKey String   @unique
+  providerTxId   String?  @unique
+  userId         String
+  type           String   // "onramp" | "offramp"
+  amount         String
+  currency       String   @default("KES")
+  status         String   @default("pending") // pending | processing | completed | failed | reversed
+  lockStatus     String?  // "locked" | "released" | "restored"
+  providerRef    String?  // M-Pesa receipt / B2C reference
+  failureReason  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([userId, type])
+  @@index([status])
+}
+

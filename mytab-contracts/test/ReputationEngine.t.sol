@@ -123,4 +123,74 @@ contract ReputationEngineTest is Test {
 
         assertEq(uint(engine.getTier(user)), uint(expectedTier));
     }
+
+    /// @notice Differential test: verifies every exact count maps to the correct tier.
+    /// Boundary is at exactly 5 (not 4), matching the spec table.
+    function test_differentialTierBoundaries() public {
+        address[7] memory subjects;
+        for (uint160 i = 0; i < 7; i++) {
+            subjects[i] = address(uint160(100 + i));
+        }
+
+        vm.startPrank(reporter);
+
+        // Count 0: Normal
+        assertEq(uint(engine.getTier(subjects[0])), uint(ReputationEngine.Tier.Normal));
+        assertFalse(engine.requiresEnforcedTrack(subjects[0]));
+
+        // Count 1: LightGrey
+        engine.recordDisapproval(subjects[1]);
+        assertEq(uint(engine.getTier(subjects[1])), uint(ReputationEngine.Tier.LightGrey));
+        assertFalse(engine.requiresEnforcedTrack(subjects[1]));
+
+        // Count 2: LightGrey (boundary upper)
+        engine.recordDisapproval(subjects[2]);
+        engine.recordDisapproval(subjects[2]);
+        assertEq(engine.getDisapprovalCount(subjects[2]), 2);
+        assertEq(uint(engine.getTier(subjects[2])), uint(ReputationEngine.Tier.LightGrey));
+        assertFalse(engine.requiresEnforcedTrack(subjects[2]));
+
+        // Count 3: DarkCharcoal (boundary lower)
+        for (uint256 i = 0; i < 3; i++) engine.recordDisapproval(subjects[3]);
+        assertEq(engine.getDisapprovalCount(subjects[3]), 3);
+        assertEq(uint(engine.getTier(subjects[3])), uint(ReputationEngine.Tier.DarkCharcoal));
+        assertTrue(engine.requiresEnforcedTrack(subjects[3]));
+
+        // Count 4: DarkCharcoal (boundary upper)
+        for (uint256 i = 0; i < 4; i++) engine.recordDisapproval(subjects[4]);
+        assertEq(engine.getDisapprovalCount(subjects[4]), 4);
+        assertEq(uint(engine.getTier(subjects[4])), uint(ReputationEngine.Tier.DarkCharcoal));
+        assertTrue(engine.requiresEnforcedTrack(subjects[4]));
+        assertFalse(registry.isBlacklisted(subjects[4])); // Not yet!
+
+        // Count 5: Blacklisted (boundary exactly at 5)
+        for (uint256 i = 0; i < 5; i++) engine.recordDisapproval(subjects[5]);
+        assertEq(engine.getDisapprovalCount(subjects[5]), 5);
+        assertEq(uint(engine.getTier(subjects[5])), uint(ReputationEngine.Tier.Blacklisted));
+        assertTrue(engine.requiresEnforcedTrack(subjects[5]));
+        assertTrue(registry.isBlacklisted(subjects[5]));
+
+        // Count 6: Still Blacklisted (post-boundary)
+        for (uint256 i = 0; i < 6; i++) engine.recordDisapproval(subjects[6]);
+        assertEq(engine.getDisapprovalCount(subjects[6]), 6);
+        assertEq(uint(engine.getTier(subjects[6])), uint(ReputationEngine.Tier.Blacklisted));
+        assertTrue(registry.isBlacklisted(subjects[6]));
+
+        vm.stopPrank();
+    }
+
+    /// @notice Blacklist is permanent: recording more disapprovals on an already-blacklisted
+    /// address does not change the blacklist status.
+    function test_blacklistIsPermanent() public {
+        vm.startPrank(reporter);
+        for (uint256 i = 0; i < 5; i++) engine.recordDisapproval(user);
+        assertTrue(registry.isBlacklisted(user));
+
+        // Additional disapprovals don't toggle blacklist
+        engine.recordDisapproval(user);
+        engine.recordDisapproval(user);
+        assertTrue(registry.isBlacklisted(user));
+        assertEq(engine.getDisapprovalCount(user), 7);
+        vm.stopPrank();
+    }
 }
